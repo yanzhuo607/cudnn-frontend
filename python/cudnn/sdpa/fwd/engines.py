@@ -461,6 +461,20 @@ def mismatch(capabilities: Capabilities, facts: "ga.SdpaGraphFacts", knobs: Opti
     if facts.padded and facts.wants_stats and not facts.thd and not capabilities.padded_stats:
         return "padding mask with generate_stats is not supported yet (per-batch seq_len_q LSE trim not plumbed)"
 
+    if facts.stats_t is not None and not facts.thd:
+        if facts.stats_t.get_data_type() != cudnn.data_type.FLOAT:
+            return f"stats must be fp32; got {facts.stats_t.get_data_type()}"
+        stats_dim = tuple(facts.stats_t.get_dim())
+        stats_stride = tuple(facts.stats_t.get_stride())
+        expected_dim = (facts.b, facts.h_q, facts.s_q, 1)
+        if stats_dim != expected_dim:
+            return f"stats must be (B, H_q, S_q, 1) = {expected_dim}; got {stats_dim}"
+        if not ga.dense_layout_ok(stats_dim, stats_stride):
+            return (
+                "stats must use a dense-compatible B/H/S permutation or padded layout "
+                f"with non-broadcast, non-overlapping-by-span strides; got {stats_stride}"
+            )
+
     if capabilities.single_wave_only:
         # See Capabilities.single_wave_only. 512 = TILES_Q * TILE_M * CTA_MMA
         # rows per cluster; resident clusters = SM count / CTA_MMA (one CTA per
@@ -866,6 +880,12 @@ def lower_dsl_prefill(
         cu_seq_kv_lens=facts.cu_seq_kv_t is not None,
         has_sink=facts.has_sink,
         thd=facts.thd,
+        # Caller-declared packed token totals (issue #624): when present the
+        # adapter binds EXACT token extents instead of the buffer-derived
+        # capacity, putting an over-allocated buffer's uninitialized tail out
+        # of TMA reach. Only ever tightens (see _thd_declared_total).
+        max_total_seq_len_q=facts.max_total_seq_len_q,
+        max_total_seq_len_kv=facts.max_total_seq_len_kv,
         dtype_o=facts.dtype_o if (facts.is_mxfp8 or facts.is_fp8) else None,
         pertensor_fp8=facts.is_fp8,
         sched_policy=knobs.sched_policy if knobs is not None else None,
